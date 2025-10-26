@@ -27,6 +27,32 @@
 #define ENABLE_DC_BLOCK 1
 #endif
 
+// Leichte Dämpfung zur Vermeidung von Clipping am Ausgang (in dB)
+#ifndef OUTPUT_ATTENUATION_DB
+#define OUTPUT_ATTENUATION_DB 1.0f
+#endif
+
+// Optionales Dithering (TPDF, ±1 LSB) zur Reduktion von Quantisierungsartefakten
+#ifndef ENABLE_TPDF_DITHER
+#define ENABLE_TPDF_DITHER 1
+#endif
+
+// Optionales sanftes Noise-Gate für Pausen (reduziert Rauschen in Stille)
+#ifndef ENABLE_NOISE_GATE
+#define ENABLE_NOISE_GATE 0
+#endif
+
+#if ENABLE_TPDF_DITHER
+// Einfache PRNG (xorshift32) für Dither
+static inline uint32_t xorshift32(uint32_t *state) {
+    uint32_t x = *state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    return *state = x;
+}
+#endif
+
 #define MOUNT_POINT "/sdcard"
 #define SD_MOSI     23
 #define SD_MISO     19
@@ -102,6 +128,12 @@ static void decoder_task(void *arg) {
     float dc_x_prev_l = 0.f, dc_y_prev_l = 0.f;
     float dc_x_prev_r = 0.f, dc_y_prev_r = 0.f;
     float lp_y_prev_l = 0.f, lp_y_prev_r = 0.f;
+
+    // Pegel-/Dither-Parameter
+    const float att_lin = powf(10.0f, -OUTPUT_ATTENUATION_DB / 20.0f);
+#if ENABLE_TPDF_DITHER
+    uint32_t rng_state = 0x12345678u; // deterministischer Start
+#endif
 
     while (1) {
         // Nachladen, wenn Puffer klein ist
@@ -184,7 +216,7 @@ static void decoder_task(void *arg) {
             out_channels = 2;
         }
 
-        // Zurück zum früheren DC-Blocker-only Pfad (optional)
+        // DC-Blocker (optional)
 #if ENABLE_DC_BLOCK
         {
             static float x_prev_l = 0.f, y_prev_l = 0.f;
@@ -198,8 +230,6 @@ static void decoder_task(void *arg) {
                     float xr = (float)pcm_buf[2*n + 1];
                     float yr = xr - x_prev_r + R * y_prev_r;
                     x_prev_r = xr; y_prev_r = yr;
-                    if (yl > 32767.f) yl = 32767.f; else if (yl < -32768.f) yl = -32768.f;
-                    if (yr > 32767.f) yr = 32767.f; else if (yr < -32768.f) yr = -32768.f;
                     pcm_buf[2*n + 0] = (int16_t)yl;
                     pcm_buf[2*n + 1] = (int16_t)yr;
                 }
@@ -208,12 +238,45 @@ static void decoder_task(void *arg) {
                     float x = (float)pcm_buf[n];
                     float y = x - x_prev_l + R * y_prev_l;
                     x_prev_l = x; y_prev_l = y;
-                    if (y > 32767.f) y = 32767.f; else if (y < -32768.f) y = -32768.f;
                     pcm_buf[n] = (int16_t)y;
                 }
             }
         }
 #endif
+
+        // Optionale Ausgabedämpfung + Dithering und optionales sanftes Noise-Gate
+        {
+            const int total_samples = samples_per_ch * out_channels;
+#if ENABLE_NOISE_GATE
+            // Schwellwert für Gate (ca. -80 dBFS)
+            const int16_t gate_thresh = 3; // ~ -80 dBFS für 16-bit
+            static int gate_counter = 0;
+            const int gate_hold_samples = 4410; // ~100 ms bei 44.1 kHz
+#endif
+            for (int i = 0; i < total_samples; ++i) {
+                float s = (float)pcm_buf[i] * att_lin;
+#if ENABLE_TPDF_DITHER
+                // TPDF Dither: (r1 + r2 - 1) * 1.0 LSB
+                float r1 = (xorshift32(&rng_state) & 0xFFFF) / 65536.0f;
+                float r2 = (xorshift32(&rng_state) & 0xFFFF) / 65536.0f;
+                s += ((r1 + r2) - 1.0f); // ±1 LSB
+#endif
+                if (s > 32767.f) s = 32767.f; else if (s < -32768.f) s = -32768.f;
+                int16_t si = (int16_t)s;
+#if ENABLE_NOISE_GATE
+                if ((si <= gate_thresh) && (si >= -gate_thresh)) {
+                    if (gate_counter < gate_hold_samples) {
+                        // innerhalb Haltezeit: auf 0 zwingen
+                        si = 0;
+                        gate_counter++;
+                    }
+                } else {
+                    gate_counter = 0;
+                }
+#endif
+                pcm_buf[i] = si;
+            }
+        }
 
         size_t bytes = (size_t)samples_per_ch * out_channels * sizeof(int16_t);
         if (bytes > 0) {
@@ -429,8 +492,8 @@ static void start_playback_from_file(const char *fullpath) {
     // Ringbuffer und Tasks starten
     play_ctx_t *ctx = calloc(1, sizeof(play_ctx_t));
     if (!ctx) { ESP_LOGE(TAG, "Kein RAM für Playback-Kontext"); return; }
-    // Kleinerer Ringbuffer, um RAM-Druck zu reduzieren
-    ctx->rb = xRingbufferCreate(24 * 1024, RINGBUF_TYPE_BYTEBUF);
+    // Etwas größerer Ringbuffer für gleichmäßigeren Datenfluss
+    ctx->rb = xRingbufferCreate(32 * 1024, RINGBUF_TYPE_BYTEBUF);
     if (!ctx->rb) { ESP_LOGE(TAG, "Ringbuffer konnte nicht erstellt werden"); free(ctx); return; }
     strlcpy(ctx->path, fullpath, sizeof(ctx->path));
     ctx->done = false;
