@@ -1,3 +1,29 @@
+## play_mp3 – Quick Start (ESP32, ESP-IDF v5.5.1)
+
+Stabiles MP3-Playback von SD (SDSPI) über I2S mit korrekt gesetzter Sample-Rate und robustem Mounting.
+
+- Release: https://github.com/braunbenjamin22-sys/play_mp3/releases/tag/milestone-v1
+- Release Notes: `RELEASE_NOTES_milestone-v1.md`
+
+### Hardware-Pins
+- SD (SDSPI): MISO=19, MOSI=23, CLK=18, CS=5
+- I2S (TX): BCLK=26, LRC/WS=25, DOUT=22 (MCLK unbenutzt)
+
+### Build & Flash (VS Code Tasks)
+- Build: ESP-IDF: Activate + Build
+- Flash: ESP-IDF: Activate + Flash (COM3)
+- Monitor: ESP-IDF: Activate + Monitor (COM3)  (Exit: Ctrl + ])
+
+Optional PowerShell (im ESP-IDF-Terminal):
+
+```
+idf.py build
+idf.py -p COM3 flash
+idf.py -p COM3 monitor
+```
+
+---
+
 | Supported Targets | ESP32 | ESP32-C2 | ESP32-C3 | ESP32-C5 | ESP32-C6 | ESP32-C61 | ESP32-H2 | ESP32-P4 | ESP32-S2 | ESP32-S3 |
 | ----------------- | ----- | -------- | -------- | -------- | -------- | --------- | -------- | -------- | -------- | -------- |
 
