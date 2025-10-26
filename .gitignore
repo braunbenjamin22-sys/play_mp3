@@ -1,0 +1,31 @@
+# ESP-IDF / CMake build outputs
+build/
+*.map
+*.bin
+*.elf
+*.hex
+*.o
+*.obj
+*.lst
+
+# IDF configs and caches
+sdkconfig.old
+compile_commands.json
+.cache/
+.espressif/
+
+# IDE/editor
+.vscode/
+.idea/
+*.suo
+*.user
+*.sdf
+*.sln
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db
