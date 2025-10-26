@@ -42,6 +42,8 @@
 i2s_chan_handle_t i2s_tx_handle = NULL;
 static sdmmc_card_t *card = NULL;
 
+// (früher: Qualitätsprofile + 10s-Wechsler, wieder entfernt für den damaligen stabilen Stand)
+
 typedef struct {
     RingbufHandle_t rb;
     volatile bool done;
@@ -96,6 +98,11 @@ static void decoder_task(void *arg) {
     bool i2s_reconfigured = false;
     int stream_channels = 2; // Standard auf Stereo
 
+    // Zustände für optionale Filter
+    float dc_x_prev_l = 0.f, dc_y_prev_l = 0.f;
+    float dc_x_prev_r = 0.f, dc_y_prev_r = 0.f;
+    float lp_y_prev_l = 0.f, lp_y_prev_r = 0.f;
+
     while (1) {
         // Nachladen, wenn Puffer klein ist
         if (buf_bytes < (size_t)(IN_BUF_SIZE / 2)) {
@@ -147,14 +154,25 @@ static void decoder_task(void *arg) {
             // Nur die Clock neu setzen (Kanal wurde bereits initialisiert)
             ESP_ERROR_CHECK(i2s_channel_disable(i2s_tx_handle));
             i2s_std_clk_config_t clk_cfg_dyn = I2S_STD_CLK_DEFAULT_CONFIG(new_hz);
-            clk_cfg_dyn.clk_src = I2S_CLK_SRC_APLL;
-            clk_cfg_dyn.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+            if (new_hz % 11025 == 0) {
+                // 44.1k-Familie: APLL + 384xFs liefert oft die präziseste LRCLK
+                clk_cfg_dyn.clk_src = I2S_CLK_SRC_APLL;
+                clk_cfg_dyn.mclk_multiple = I2S_MCLK_MULTIPLE_384;
+            } else {
+                // 48k-Familie: APLL + 256xFs
+                clk_cfg_dyn.clk_src = I2S_CLK_SRC_APLL;
+                clk_cfg_dyn.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+            }
             ESP_ERROR_CHECK(i2s_channel_reconfig_std_clock(i2s_tx_handle, &clk_cfg_dyn));
+            ESP_LOGI(TAG, "I2S reconfig: %d Hz, clk_src=%s, mclk_mult=%d",
+                     new_hz,
+                     (clk_cfg_dyn.clk_src == I2S_CLK_SRC_DEFAULT ? "DEFAULT" : (clk_cfg_dyn.clk_src == I2S_CLK_SRC_APLL ? "APLL" : "OTHER")),
+                     (int)clk_cfg_dyn.mclk_multiple);
             ESP_ERROR_CHECK(i2s_channel_enable(i2s_tx_handle));
             i2s_reconfigured = true;
         }
 
-        // Bei Mono auf Stereo duplizieren
+    // Bei Mono auf Stereo duplizieren
         int out_channels = stream_channels;
         if (stream_channels == 1) {
             // samples_per_ch Samples -> 2*samples interleaved
@@ -166,8 +184,8 @@ static void decoder_task(void *arg) {
             out_channels = 2;
         }
 
+        // Zurück zum früheren DC-Blocker-only Pfad (optional)
 #if ENABLE_DC_BLOCK
-        // Optionaler DC-Blocker (1. Ordnung), reduziert leichten DC-Offset/Rumpeln
         {
             static float x_prev_l = 0.f, y_prev_l = 0.f;
             static float x_prev_r = 0.f, y_prev_r = 0.f;
@@ -263,10 +281,11 @@ static esp_err_t init_i2s(void) {
     ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &i2s_tx_handle, NULL));
 
     // Standardmodus konfigurieren inkl. GPIO-Pins (neue I2S-API)
-    // Für den Testsinus starten wir mit 48 kHz (auf ESP32 besonders stabil)
-    i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(48000);
-    clk_cfg.clk_src = I2S_CLK_SRC_APLL;            // APLL für geringen Jitter
-    clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256; // 256xFs
+    // Startrate 44.1 kHz (passt oft besser zu MP3; wird später dynamisch auf Stream-Rate umgestellt)
+    i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(44100);
+    // 44.1‑kHz‑Initialisierung mit APLL + 384×Fs für präzise LRCLK
+    clk_cfg.clk_src = I2S_CLK_SRC_APLL;
+    clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_384; // 384xFs
     i2s_std_config_t std_cfg = {
         .clk_cfg = clk_cfg,
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(16, I2S_SLOT_MODE_STEREO),
@@ -278,8 +297,8 @@ static esp_err_t init_i2s(void) {
             .din  = I2S_GPIO_UNUSED
         }
     };
-    // 32-bit Slot (Padding), Daten bleiben 16-bit -> stabilere Taktung bei vielen DACs
-    std_cfg.slot_cfg.slot_bit_width = I2S_SLOT_BIT_WIDTH_32BIT;
+    // Setze Slot-Breite auf 16-bit (entspricht Datenbreite) – kann bei 44.1 kHz präzisere Teilungsverhältnisse ermöglichen
+    std_cfg.slot_cfg.slot_bit_width = I2S_SLOT_BIT_WIDTH_16BIT;
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(i2s_tx_handle, &std_cfg));
 
     // Kanal aktivieren
